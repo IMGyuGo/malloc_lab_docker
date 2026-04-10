@@ -1,7 +1,6 @@
-/* 
- * clock.c - Routines for using the cycle counters on x86, 
- *           Alpha, and Sparc boxes.
- * 
+/*
+ * clock.c - x86, Alpha, Sparc 등에서 사이클 카운터 사용 루틴
+ *
  * Copyright (c) 2002, R. Bryant and D. O'Hallaron, All rights reserved.
  * May not be used, modified, or copied without permission.
  */
@@ -13,59 +12,58 @@
 #include "clock.h"
 
 
-/******************************************************* 
- * Machine dependent functions 
+/*******************************************************
+ * 기종 의존 함수
  *
- * Note: the constants __i386__ and  __alpha
- * are set by GCC when it calls the C preprocessor
- * You can verify this for yourself using gcc -v.
+ * 참고: __i386__, __alpha 상수는 GCC가 전처리기에 넣는다.
+ * gcc -v로 확인할 수 있다.
  *******************************************************/
 
-#if defined(__i386__)  
+#if defined(__i386__)
 /*******************************************************
- * Pentium versions of start_counter() and get_counter()
+ * Pentium용 start_counter(), get_counter()
  *******************************************************/
 
 
 /* $begin x86cyclecounter */
-/* Initialize the cycle counter */
+/* 사이클 카운터 초기화 */
 static unsigned cyc_hi = 0;
 static unsigned cyc_lo = 0;
 
 
-/* Set *hi and *lo to the high and low order bits  of the cycle counter.  
-   Implementation requires assembly code to use the rdtsc instruction. */
+/* *hi, *lo에 카운터의 상·하위 비트를 넣는다.
+   rdtsc 어셈블리가 필요하다. */
 void access_counter(unsigned *hi, unsigned *lo)
 {
-    asm("rdtsc; movl %%edx,%0; movl %%eax,%1"   /* Read cycle counter */
-	: "=r" (*hi), "=r" (*lo)                /* and move results to */
-	: /* No input */                        /* the two outputs */
+    asm("rdtsc; movl %%edx,%0; movl %%eax,%1"   /* 사이클 카운터 읽기 */
+	: "=r" (*hi), "=r" (*lo)                /* 결과를 두 출력에 저장 */
+	: /* 입력 없음 */
 	: "%edx", "%eax");
 }
 
-/* Record the current value of the cycle counter. */
+/* 현재 사이클 카운터 값을 기록한다. */
 void start_counter()
 {
     access_counter(&cyc_hi, &cyc_lo);
 }
 
-/* Return the number of cycles since the last call to start_counter. */
+/* 직전 start_counter 이후 경과 사이클 수를 반환한다. */
 double get_counter()
 {
     unsigned ncyc_hi, ncyc_lo;
     unsigned hi, lo, borrow;
     double result;
 
-    /* Get cycle counter */
+    /* 사이클 카운터 읽기 */
     access_counter(&ncyc_hi, &ncyc_lo);
 
-    /* Do double precision subtraction */
+    /* 배정밀도 뺄셈 */
     lo = ncyc_lo - cyc_lo;
     borrow = lo > ncyc_lo;
     hi = ncyc_hi - cyc_hi - borrow;
     result = (double) hi * (1 << 30) * 4 + lo;
     if (result < 0) {
-	fprintf(stderr, "Error: counter returns neg value: %.0f\n", result);
+	fprintf(stderr, "오류: 카운터가 음수 값 반환: %.0f\n", result);
     }
     return result;
 }
@@ -74,30 +72,23 @@ double get_counter()
 #elif defined(__alpha)
 
 /****************************************************
- * Alpha versions of start_counter() and get_counter()
+ * Alpha용 start_counter(), get_counter()
  ***************************************************/
 
-/* Initialize the cycle counter */
+/* 사이클 카운터 초기화 */
 static unsigned cyc_hi = 0;
 static unsigned cyc_lo = 0;
 
 
-/* Use Alpha cycle timer to compute cycles.  Then use
-   measured clock speed to compute seconds 
+/* Alpha 사이클 타이머로 사이클을 구하고, 측정한 클럭 속도로 초 단위 환산
 */
 
 /*
- * counterRoutine is an array of Alpha instructions to access 
- * the Alpha's processor cycle counter. It uses the rpcc 
- * instruction to access the counter. This 64 bit register is 
- * divided into two parts. The lower 32 bits are the cycles 
- * used by the current process. The upper 32 bits are wall 
- * clock cycles. These instructions read the counter, and 
- * convert the lower 32 bits into an unsigned int - this is the 
- * user space counter value.
- * NOTE: The counter has a very limited time span. With a 
- * 450MhZ clock the counter can time things for about 9 
- * seconds. */
+ * counterRoutine은 Alpha 프로세서 사이클 카운터에 접근하는 명령 배열이다.
+ * rpcc로 카운터를 읽는다. 이 64비트 레지스터는 하위 32비트가 현재 프로세스
+ * 사이클, 상위 32비트가 월 클록 사이다. 카운터를 읽어 하위 32비트를
+ * unsigned int로 바꾼 값이 사용자 공간 카운터다.
+ * 참고: 카운터 범위가 매우 제한적이다. 450MHz면 약 9초까지 측정 가능. */
 static unsigned int counterRoutine[] =
 {
     0x601fc000u,
@@ -105,13 +96,13 @@ static unsigned int counterRoutine[] =
     0x6bfa8001u
 };
 
-/* Cast the above instructions into a function. */
+/* 위 명령을 함수로 캐스팅 */
 static unsigned int (*counter)(void)= (void *)counterRoutine;
 
 
 void start_counter()
 {
-    /* Get cycle counter */
+    /* 사이클 카운터 읽기 */
     cyc_hi = 0;
     cyc_lo = counter();
 }
@@ -128,7 +119,7 @@ double get_counter()
     hi = ncyc_hi - cyc_hi - borrow;
     result = (double) hi * (1 << 30) * 4 + lo;
     if (result < 0) {
-	fprintf(stderr, "Error: Cycle counter returning negative value: %.0f\n", result);
+	fprintf(stderr, "오류: 사이클 카운터가 음수 반환: %.0f\n", result);
     }
     return result;
 }
@@ -136,26 +127,22 @@ double get_counter()
 #else
 
 /****************************************************************
- * All the other platforms for which we haven't implemented cycle
- * counter routines. Newer models of sparcs (v8plus) have cycle
- * counters that can be accessed from user programs, but since there
- * are still many sparc boxes out there that don't support this, we
- * haven't provided a Sparc version here.
+ * 사이클 카운터를 아직 구현하지 않은 기종.
+ * 최신 Sparc(v8plus)는 사용자 프로그램에서 사이클 카운터에 접근할 수 있으나
+ * 지원하지 않는 Sparc이 많아 여기서는 Sparc 버전을 제공하지 않는다.
  ***************************************************************/
 
 void start_counter()
 {
-    printf("ERROR: You are trying to use a start_counter routine in clock.c\n");
-    printf("that has not been implemented yet on this platform.\n");
-    printf("Please choose another timing package in config.h.\n");
+    printf("오류: clock.c의 start_counter가 이 플랫폼에 구현되어 있지 않습니다.\n");
+    printf("다른 타이밍 패키지를 config.h에서 선택하세요.\n");
     exit(1);
 }
 
-double get_counter() 
+double get_counter()
 {
-    printf("ERROR: You are trying to use a get_counter routine in clock.c\n");
-    printf("that has not been implemented yet on this platform.\n");
-    printf("Please choose another timing package in config.h.\n");
+    printf("오류: clock.c의 get_counter가 이 플랫폼에 구현되어 있지 않습니다.\n");
+    printf("다른 타이밍 패키지를 config.h에서 선택하세요.\n");
     exit(1);
 }
 #endif
@@ -164,11 +151,11 @@ double get_counter()
 
 
 /*******************************
- * Machine-independent functions
+ * 기종 독립 함수
  ******************************/
 double ovhd()
 {
-    /* Do it twice to eliminate cache effects */
+    /* 캐시 효과 제거를 위해 두 번 수행 */
     int i;
     double result;
 
@@ -180,8 +167,7 @@ double ovhd()
 }
 
 /* $begin mhz */
-/* Estimate the clock rate by measuring the cycles that elapse */ 
-/* while sleeping for sleeptime seconds */
+/* sleeptime초 동안 sleep하며 경과 사이클로 클럭 속도 추정 */
 double mhz_full(int verbose, int sleeptime)
 {
     double rate;
@@ -189,19 +175,19 @@ double mhz_full(int verbose, int sleeptime)
     start_counter();
     sleep(sleeptime);
     rate = get_counter() / (1e6*sleeptime);
-    if (verbose) 
-	printf("Processor clock rate ~= %.1f MHz\n", rate);
+    if (verbose)
+	printf("프로세서 클럭 속도 ~= %.1f MHz\n", rate);
     return rate;
 }
 /* $end mhz */
 
-/* Version using a default sleeptime */
+/* 기본 sleeptime 사용 버전 */
 double mhz(int verbose)
 {
     return mhz_full(verbose, 2);
 }
 
-/** Special counters that compensate for timer interrupt overhead */
+/** 타이머 인터럽트 오버헤드를 보정하는 특수 카운터 */
 
 static double cyc_per_tick = 0.0;
 
@@ -209,7 +195,7 @@ static double cyc_per_tick = 0.0;
 #define THRESHOLD 1000
 #define RECORDTHRESH 3000
 
-/* Attempt to see how much time is used by timer interrupt */
+/* 타이머 인터럽트에 쓰이는 시간 측정 시도 */
 static void callibrate(int verbose)
 {
     double oldt;
@@ -234,7 +220,7 @@ static void callibrate(int verbose)
 		    cyc_per_tick = cpt;
 		/*
 		  if (verbose)
-		  printf("Saw event lasting %.0f cycles and %d ticks.  Ratio = %f\n",
+		  printf("이벤트 지속 %.0f 사이클, 틱 %d개. 비율 = %f\n",
 		  newt-oldt, (int) (newc-oldc), cpt);
 		*/
 		e++;
@@ -244,12 +230,12 @@ static void callibrate(int verbose)
 	}
     }
     if (verbose)
-	printf("Setting cyc_per_tick to %f\n", cyc_per_tick);
+	printf("cyc_per_tick을 %f로 설정\n", cyc_per_tick);
 }
 
 static clock_t start_tick = 0;
 
-void start_comp_counter() 
+void start_comp_counter()
 {
     struct tms t;
 
@@ -260,7 +246,7 @@ void start_comp_counter()
     start_counter();
 }
 
-double get_comp_counter() 
+double get_comp_counter()
 {
     double time = get_counter();
     double ctime;
@@ -271,7 +257,7 @@ double get_comp_counter()
     ticks = t.tms_utime - start_tick;
     ctime = time - ticks*cyc_per_tick;
     /*
-      printf("Measured %.0f cycles.  Ticks = %d.  Corrected %.0f cycles\n",
+      printf("측정 %.0f 사이클. 틱 = %d. 보정 후 %.0f 사이클\n",
       time, (int) ticks, ctime);
     */
     return ctime;
