@@ -462,24 +462,13 @@ void mm_free(void *ptr)
     coalesce(ptr);
 }
 
-// /*
-//  * mm_realloc - mm_malloc과 mm_free만으로 단순 구현
-//  */
 void *mm_realloc(void *ptr, size_t size)
 {
     // free alloc free
-    // 앞을 봐도 될 것 같은데? -> 그치만 메모리 효율성이 많이 떨어질 것 같다.
     // 1. 사이즈가 감소할 경우 -> place로 자르기
     // 2. 뒤에 free가 있고, 뒤에 사이즈를 더한 값이 size보다 클 경우에는 딱 충분한 크기만큼만 확장 (free일 경우) - place를 사용해서 구현
     // 3. 뒤가 확장이 불가능한 eplilogue header일 경우
     // 4. 이 경우들 다 빼고 예외상황에는 단순구현으로
-
-    void *newptr;
-    size_t asize;
-    size_t old_block_size;
-    size_t next_block_size;
-    size_t copySize;
-    char *next_bp;
 
     if (ptr == NULL)
     {
@@ -492,59 +481,76 @@ void *mm_realloc(void *ptr, size_t size)
         return NULL;
     }
 
-    asize = MAX(ALIGN(size + DSIZE), MINBLOCKSIZE);
-    old_block_size = GET_SIZE(HDRP(ptr));
+    void *newptr;
+    char *next_bp = NEXT_BLKP(ptr);
+    size_t asize = MAX(ALIGN(size + DSIZE), MINBLOCKSIZE); // 요청크기
+    size_t cur_size = GET_SIZE(HDRP(ptr));
+    size_t next_size = GET_SIZE((HDRP(next_bp)));
+    size_t copySize;
 
     // 1. 요청 크기가 더 작아진 경우에는 같은 자리에서 바로 잘라서 남는 부분만 free block으로 돌려준다.
-    if (asize <= old_block_size)
+    if (asize <= cur_size)
     {
-        place_allocated(ptr, old_block_size, asize, 1);
+        // 이걸 하는게 더 메모리 효율이 좋을까? 나쁠까? 분석
+        // place_allocated(ptr, cur_size, asize, 1);
         return ptr;
     }
 
-    next_bp = NEXT_BLKP(ptr);
+    // 1-1. malloc으로 공간있는지 먼저 확인
+    // realloc에서는 현재 allocated block 자체에 coalesce(ptr)를 직접 쓰면 안 된다.
 
-    // 2. 뒤 블록이 free면 현재 블록과 합쳐서 in-place 확장을 먼저 시도한다.
-    if (!GET_ALLOC(HDRP(next_bp)))
+    // 2. 확장가능 alloc free
+    // 이전 free block과 합쳐지면 payload 시작 주소가 바뀔 수 있기 때문이다.
+    // 따라서 바로 뒤 free block만 free list에서 제거해서 현재 블록 뒤에 직접 붙인다.
+    if (!GET_ALLOC(HDRP(next_bp)) && (cur_size + next_size) >= asize)
     {
-        next_block_size = GET_SIZE(HDRP(next_bp));
-        if ((old_block_size + next_block_size) >= asize)
-        {
-            rem_free(next_bp);
-            place_allocated(ptr, old_block_size + next_block_size, asize, 1);
-            return ptr;
-        }
+
+        rem_free(next_bp);
+        place_allocated(ptr, cur_size + next_size, asize, 1);
+        return ptr;
     }
 
-    // 3. 바로 뒤가 epilogue면 heap을 더 늘린 다음 다시 한 번 "뒤 free 확장" 경로를 태운다.
-    if (GET_SIZE(HDRP(next_bp)) == 0)
+    // 바로 뒤가 epilogue면 heap을 늘린 뒤, 다시 한 번 "뒤 free 붙이기"를 시도한다.
+    // 공간이 없으므로 추가
+    if (next_size == 0 || (!GET_ALLOC(HDRP(next_bp)) && (cur_size + next_size) < asize))
     {
-        size_t extend_size = MAX(asize - old_block_size, CHUNKSIZE);
-        // 두번째 : 확장할 수 있는 만큼만 확장
-        size_t added_size = asize - old_block_size;
-
-        if (extend_heap(added_size / WSIZE) != NULL)
+        // 3. 확장불가능
+        /**
+         * -> [alloc free]이지만, alloc + free가 asize보다 작은 경우 -> [*alloc free alloc] -> [alloc alloc]으로, 확장 불가능한 경우
+         * -> [alloc epilogue]으로, 아예 heap 자체를 확장해야하는 경우 -> [alloc free epilogue]
+         **/
+        // MAX(asize - cur_size, CHUNKSIZE)
+        if (extend_heap((asize - cur_size) / WSIZE) != NULL)
         {
+            // 2번째 케이스
             next_bp = NEXT_BLKP(ptr);
-            next_block_size = GET_SIZE(HDRP(next_bp));
+            next_size = GET_SIZE(HDRP(next_bp));
 
-            if (!GET_ALLOC(HDRP(next_bp)) && (old_block_size + next_block_size) >= asize)
+            if (!GET_ALLOC(HDRP(next_bp)) && (cur_size + next_size) >= asize)
             {
                 rem_free(next_bp);
-                place_allocated(ptr, old_block_size + next_block_size, asize, 1);
+                place_allocated(ptr, cur_size + next_size, asize, 1);
                 return ptr;
             }
         }
     }
 
-    // 4. 위 경로들로 해결되지 않는 경우에만 새 블록을 잡고 복사하는 단순 구현으로 fallback 한다.
+    // 위 경로가 모두 실패하면 새 블록을 받아서 옮기는 단순 fallback으로 처리한다.
+    // mm_malloc이 내부에서 find_fit/place를 모두 처리하므로 realloc에서는 free block을 직접 다루지 않는 편이 안전하다.
     newptr = mm_malloc(size);
     if (newptr == NULL)
+    {
         return NULL;
+    }
 
-    copySize = old_block_size - DSIZE;
+    // 복사 길이는 "기존 payload 크기"와 "새 요청 크기" 중 작은 값이어야 한다.
+    // block 전체 크기를 memcpy에 넣으면 header/footer까지 읽을 수 있다.
+    copySize = cur_size - DSIZE;
     if (size < copySize)
+    {
         copySize = size;
+    }
+
     memcpy(newptr, ptr, copySize);
     mm_free(ptr);
     return newptr;
