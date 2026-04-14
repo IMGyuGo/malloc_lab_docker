@@ -407,9 +407,6 @@ void *mm_malloc(size_t size)
     return bp;
 }
 
-/**
- * find_fit
- */
 static char *find_fit(size_t size)
 {
     int index = SEG_INDEX(size);
@@ -417,16 +414,31 @@ static char *find_fit(size_t size)
     while (index < SEG_LIST_COUNT)
     {
         char *bp = GET_SEG_HEAD(index);
+        char *best_bp = NULL;
+        size_t best_size = 0;
         while (bp != NULL)
         {
-            // 안에서 Linked List 방식으로 탐색 중
             size_t free_size = GET_SIZE(HDRP(bp));
+
             if (!GET_ALLOC(HDRP(bp)) && free_size >= size)
             {
-                return bp;
-            }
+                if (free_size == size)
+                {
+                    return bp;
+                }
 
+                if (best_bp == NULL || free_size < best_size)
+                {
+                    best_bp = bp;
+                    best_size = free_size;
+                }
+            }
             bp = GET_SUCC(bp);
+        }
+
+        if (best_bp != NULL)
+        {
+            return best_bp;
         }
         index += 1;
     }
@@ -512,17 +524,12 @@ void *mm_realloc(void *ptr, size_t size)
 
     // 바로 뒤가 epilogue면 heap을 늘린 뒤, 다시 한 번 "뒤 free 붙이기"를 시도한다.
     // 공간이 없으므로 추가
+    // [alloc epilogue]으로, 아예 heap 자체를 확장해야하는 경우 -> [alloc free epilogue]
     if (next_size == 0 || (!GET_ALLOC(HDRP(next_bp)) && (cur_size + next_size) < asize))
     {
-        // 3. 확장불가능
-        /**
-         * -> [alloc free]이지만, alloc + free가 asize보다 작은 경우 -> [*alloc free alloc] -> [alloc alloc]으로, 확장 불가능한 경우
-         * -> [alloc epilogue]으로, 아예 heap 자체를 확장해야하는 경우 -> [alloc free epilogue]
-         **/
         // MAX(asize - cur_size, CHUNKSIZE)
         if (extend_heap((asize - cur_size) / WSIZE) != NULL)
         {
-            // 2번째 케이스
             next_bp = NEXT_BLKP(ptr);
             next_size = GET_SIZE(HDRP(next_bp));
 
@@ -535,6 +542,10 @@ void *mm_realloc(void *ptr, size_t size)
         }
     }
 
+    // 3. 확장불가능
+    /**
+     * -> [alloc free]이지만, alloc + free가 asize보다 작은 경우 -> [*alloc free alloc] -> [alloc alloc]으로, 확장 불가능한 경우
+     **/
     // 위 경로가 모두 실패하면 새 블록을 받아서 옮기는 단순 fallback으로 처리한다.
     // mm_malloc이 내부에서 find_fit/place를 모두 처리하므로 realloc에서는 free block을 직접 다루지 않는 편이 안전하다.
     newptr = mm_malloc(size);
