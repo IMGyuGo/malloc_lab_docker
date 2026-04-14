@@ -76,6 +76,11 @@ team_t team = {
 
 static char *heap_listp;
 
+static void *extend_heap(size_t words);
+static void *coalesce(void *bp);
+static char *find_fit(size_t size);
+static void place(char *p, size_t asize);
+
 /*
  * mm_init - malloc 패키지 초기화.
  */
@@ -270,44 +275,96 @@ void mm_free(void *ptr)
     coalesce(ptr);
 }
 
-/*
- * mm_realloc - mm_malloc과 mm_free만으로 단순 구현
- */
-// void *mm_realloc(void *ptr, size_t size)
-// {
-//     void *oldptr = ptr;
-//     void *newptr;
-//     size_t copySize;
-
-//     newptr = mm_malloc(size);
-//     if (newptr == NULL)
-//         return NULL;
-//     copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-//     if (size < copySize)
-//         copySize = size;
-//     memcpy(newptr, oldptr, copySize);
-//     mm_free(oldptr);
-//     return newptr;
-// }
-
 void *mm_realloc(void *ptr, size_t size)
 {
     void *newptr;
-    size_t copySize;
-    size_t oldpayload;
+    void *bp = ptr;
+
+    size_t all_size = ALIGN(size) + DSIZE;
+    size_t cur_size = GET_SIZE(HDRP(bp));
+    size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
+
+    // if (size == 0)
+    // {
+    //     mm_free(bp);
+    //     return NULL;
+    // }
+
+    // if (all_size <= cur_size)
+    // {
+    //     PUT(HDRP(bp), PACK(all_size, 0));
+    //     PUT(FTRP(bp), PACK(all_size, 0));
+    //     return bp;
+    // }
+
     if (ptr == NULL)
-        return mm_malloc(size);
-    if (size == 0)
     {
-        mm_free(ptr);
-        return NULL;
+        return mm_malloc(size);
     }
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-        return NULL;
-    oldpayload = GET_SIZE(HDRP(ptr)) - DSIZE;
-    copySize = (size < oldpayload) ? size : oldpayload;
-    memcpy(newptr, ptr, copySize);
-    mm_free(ptr);
-    return newptr;
+
+    if ((!GET_ALLOC(HDRP(NEXT_BLKP(bp)))) &&
+        (all_size <= cur_size + next_size))
+    {
+
+        PUT(HDRP(bp), PACK((cur_size + next_size), 0));
+        PUT(FTRP(bp), PACK((cur_size + next_size), 0));
+
+        place(bp, all_size);
+
+        return bp;
+    }
+    else
+    {
+        newptr = mm_malloc(size);
+
+        if (newptr == NULL)
+        {
+            newptr = extend_heap(MAX(all_size - cur_size, CHUNKSIZE));
+
+            if (!GET_ALLOC(HDRP(NEXT_BLKP(bp))) && all_size <= cur_size + next_size)
+            {
+                next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
+
+                PUT(HDRP(bp), PACK((cur_size + next_size), 0));
+                PUT(FTRP(bp), PACK((cur_size + next_size), 0));
+
+                place(bp, all_size);
+
+                return bp;
+            }
+
+            // alloc free alloc epilogue 블럭일 경우, free 부분을 확장 후, 뒤로 옮기기 위해서 따로 조건을 추가
+            place(newptr, all_size);
+            memcpy(newptr, bp, all_size - DSIZE);
+            mm_free(bp);
+            return bp;
+        }
+
+        memcpy(newptr, bp, all_size - DSIZE);
+        mm_free(bp);
+
+        return newptr;
+    }
 }
+
+// void *mm_realloc(void *ptr, size_t size)
+// {
+//     void *newptr;
+//     size_t copySize;
+//     size_t oldpayload;
+//     if (ptr == NULL)
+//         return mm_malloc(size);
+//     if (size == 0)
+//     {
+//         mm_free(ptr);
+//         return NULL;
+//     }
+//     newptr = mm_malloc(size);
+//     if (newptr == NULL)
+//         return NULL;
+//     oldpayload = GET_SIZE(HDRP(ptr)) - DSIZE;
+//     copySize = (size < oldpayload) ? size : oldpayload;
+//     memcpy(newptr, ptr, copySize);
+//     mm_free(ptr);
+//     return newptr;
+// }
