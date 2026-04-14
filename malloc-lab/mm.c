@@ -107,15 +107,17 @@ team_t team = {
 #define GET_SUCC(bp) ((char *)GET2(SUCC(bp)))
 #define SET_PRED(bp, ptr) (PUT2(PRED(bp), (ptr)))
 #define SET_SUCC(bp, ptr) (PUT2(SUCC(bp), (ptr)))
+#define SEG_HEAD(index) ((char *)(seg_free_listp + ((index) * SIZE_T_SIZE)))
+#define GET_SEG_HEAD(index) ((char *)GET2(SEG_HEAD(index)))
+#define SET_SEG_HEAD(index, ptr) (PUT2(SEG_HEAD(index), (ptr)))
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 static char *heap_listp;
 // 가용 리스트에 제일 앞에 담기는 것
-static char *heap_free_listp;
 // 정해진 리스트의 개수를 배열로 담는 그릇
-static char *seg_free_listp[SEG_LIST_COUNT];
+static char *seg_free_listp;
 
 /*
  * SEG LIST 전환 힌트
@@ -139,21 +141,6 @@ static char *seg_free_listp[SEG_LIST_COUNT];
  * - `find_fit`
  *   요청 크기의 class에서 시작해서 더 큰 class로 올라가며 탐색하면 된다.
  *   처음에는 "각 class 내부 first fit + 상위 class 순차 탐색"만 해도 구현이 단순하고 충분히 빠르다.
- *
- * static void *find_fit(size_t asize)
- * {
- *    void *bp;
- *
- *    // 명시적 가용 리스트에서 asize보다 사이즈가 큰 블록을 탐색 (명시적 가용 리스트의 끝, 즉 프롤로그 블록에 이르기 전까지)
- *    for (bp = explicit_listp; GET_ALLOC(HDRP(bp)) != 1; bp = GET_SUCC_FREEP(bp))
- *    {
- *        if (GET_SIZE(HDRP(bp)) >= asize)
- *            return bp;
- *   }
- *
- *    return NULL; // 가용한 블록이 없는 경우
- * }
- *
  *
  * - `coalesce`
  *   이웃 free block이 있으면 각각 자기 class list에서 먼저 제거한 뒤 합친다.
@@ -189,21 +176,22 @@ int mm_init(void)
      * (void*) -1 (유효하지 않은 주소)
      * 보통 시스템 콜 실패 시 반환값!
      */
-    if ((heap_listp = mem_sbrk(4 * WSIZE + SEG_ROOT_BYTES)) == (void *)-1)
+    size_t prologue_size = SEG_ROOT_BYTES + DSIZE;
+
+    if ((heap_listp = mem_sbrk(SEG_ROOT_BYTES + (4 * WSIZE))) == (void *)-1)
         return -1;
     PUT(heap_listp, 0); // 4 byte 패딩 설정
-    // 이 공간에 seglist 배열이 들어가 있음
-    PUT(heap_listp + (1 * WSIZE + SEG_ROOT_BYTES), PACK(DSIZE, 1)); // prologue header
-    PUT(heap_listp + (2 * WSIZE + SEG_ROOT_BYTES), PACK(DSIZE, 1)); // prologue footer
-    PUT(heap_listp + (3 * WSIZE + SEG_ROOT_BYTES), PACK(0, 1));     // epilogue header
+    PUT(heap_listp + (1 * WSIZE), PACK(prologue_size, 1));
 
-    heap_listp += (2 * WSIZE); // Payload 위치 설정 (prologue payload)
-    heap_free_listp = NULL;
-    char i;
-    for (i; i < SEG_LIST_COUNT; i++)
+    seg_free_listp = heap_listp + (2 * WSIZE);
+    for (int i = 0; i < SEG_LIST_COUNT; i++)
     {
-        PUT2(seg_free_listp[i], NULL);
+        SET_SEG_HEAD(i, NULL);
     }
+    PUT(heap_listp + SEG_ROOT_BYTES + (2 * WSIZE), PACK(prologue_size, 1));
+    PUT(heap_listp + SEG_ROOT_BYTES + (3 * WSIZE), PACK(0, 1));
+
+    heap_listp = seg_free_listp;
 
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
@@ -234,8 +222,13 @@ static void *extend_heap(size_t words)
 // heap_free_listp에 스택 방식으로 집어넣기
 static void push_free(void *p)
 {
+    if (p == NULL)
+    {
+        return;
+    }
+
     // 1. 사이즈를 구한다.
-    size_t size = GET_SIZE(p);
+    size_t size = GET_SIZE(HDRP(p));
 
     // 2. 사이즈에 맞는 클래스를 찾는다.
     char index = SEG_INDEX(size);
@@ -243,12 +236,7 @@ static void push_free(void *p)
     // 3. LIFO 방식으로 집어넣는다.
     char *old_ptr;
 
-    if (p == NULL)
-    {
-        return;
-    }
-
-    old_ptr = seg_free_listp[index];
+    old_ptr = GET_SEG_HEAD(index);
 
     /**
      * PUT2(PRED(p), NULL);
@@ -260,7 +248,7 @@ static void push_free(void *p)
     {
         SET_PRED(old_ptr, p);
     }
-    seg_free_listp[index] = p;
+    SET_SEG_HEAD(index, p);
 }
 
 // heap_free_listp에 스택 방식으로 빼기
@@ -268,67 +256,53 @@ static void push_free(void *p)
 static void rem_free(void *p)
 {
     // 1. 먼저 사이즈를 구한다.
-    size_t size = GET_SIZE(p);
-    // 2. 사이즈에 맞는 클래스를 찾는다.
-    char index = SEG_INDEX(size);
-    // 3. LIFO 방식으로 클래스에서 찾아서 제거한다.
-    // -> 하지만 그 클래스에 아무것도 존재하지 않는다면
-    // -> 다음 블럭으로 넘어가서 체크를 해봐야 한다.
-    while (index != 16)
-    {
-        char *new_ptr = seg_free_listp[index];
-
-        if (new_ptr == NULL)
-        {
-            index += 1;
-            continue;
-        }
-
-        return;
-    }
-
-    return NULL;
-
-    char *pred;
-    char *succ;
-
-    // 중요!!
     if (p == NULL)
     {
         return;
     }
 
-    /**
-     * GET2(PRED(p));
-     * GET2(SUCC(p));
-     */
-    pred = GET_PRED(p);
-    succ = GET_SUCC(p);
-
-    /**
-     * 만약 없어진게 첫번째꺼라면
-     * free list 첫번째에 값 집어넣기
-     **/
-    if (pred == NULL)
-    {
-        heap_free_listp = succ;
-    }
-    else
-    {
-        // 앞에 있는거의 뒤를 다음걸로 설정
-        SET_SUCC(pred, succ);
-    }
-
-    // 만약 마지막이 아니라면,
-    if (succ != NULL)
-    {
-        // 뒤에 있는거의 앞을 이전걸로 설정
-        SET_PRED(succ, pred);
-    }
+    size_t size = GET_SIZE(HDRP(p));
+    // 2. 사이즈에 맞는 클래스를 찾는다.
+    char index = SEG_INDEX(size);
+    // 3. LIFO 방식으로 클래스에서 찾아서 제거한다.
+    // -> 하지만 그 클래스에 아무것도 존재하지 않는다면
+    // -> 다음 블럭으로 넘어가서 체크를 해봐야 한다.
 
     // 중요!!
-    SET_PRED(p, NULL);
-    SET_SUCC(p, NULL);
+    if (index < SEG_LIST_COUNT)
+    {
+        char *pred = GET_PRED(p);
+        char *succ = GET_SUCC(p);
+
+        /**
+         * 만약 없어진게 첫번째꺼라면
+         * free list 첫번째에 값 집어넣기
+         **/
+        if (pred == NULL)
+        {
+            SET_SEG_HEAD(index, succ);
+        }
+        else
+        {
+            // 앞에 있는거의 뒤를 다음걸로 설정
+            SET_SUCC(pred, succ);
+        }
+
+        // 만약 마지막이 아니라면,
+        if (succ != NULL)
+        {
+            // 뒤에 있는거의 앞을 이전걸로 설정
+            SET_PRED(succ, pred);
+        }
+
+        // 중요!!
+        SET_PRED(p, NULL);
+        SET_SUCC(p, NULL);
+
+        return;
+    }
+
+    return;
 }
 
 static void *coalesce(void *bp)
@@ -438,31 +412,23 @@ void *mm_malloc(size_t size)
  */
 static char *find_fit(size_t size)
 {
-    // 힙 주소를 first_fit으로 찾는 방식 고안
-    // 만약 next_fit이라면, 이미 전역 포인터 변수가 하나 더 있어야 할 거 같다.(내 생각)
-    char *bp = heap_free_listp;
+    int index = SEG_INDEX(size);
 
-    while (bp != NULL)
+    while (index < SEG_LIST_COUNT)
     {
-        // char *pred_header = HDRP(PREV_BLKP(bp)); // 전임자의 HEADER
-        // char *pred_footer = FTRP(PREV_BLKP(bp)); // 전임자의 FOOTER
-        // char *succ_header = HDRP(NEXT_BLKP(bp)); // 후임자의 HEADER
-        // char *succ_footer = FTRP(NEXT_BLKP(bp)); // 후임자의 FOOTER
-
-        // size_t is_pred_alloc = GET_ALLOC(pred_footer);         // 이전이 alloc인지?
-        // size_t is_succ_alloc = GET_ALLOC(succ_header);         // 이후가 alloc인지?
-
-        /**
-         * 1. size <= free_size 일 경우
-         * 2. alloc이 아닌 경우
-         **/
-        size_t free_size = GET_SIZE(HDRP(bp));
-        if (!GET_ALLOC(HDRP(bp)) && free_size >= size)
+        char *bp = GET_SEG_HEAD(index);
+        while (bp != NULL)
         {
-            return bp;
-        }
+            // 안에서 Linked List 방식으로 탐색 중
+            size_t free_size = GET_SIZE(HDRP(bp));
+            if (!GET_ALLOC(HDRP(bp)) && free_size >= size)
+            {
+                return bp;
+            }
 
-        bp = GET_SUCC(bp);
+            bp = GET_SUCC(bp);
+        }
+        index += 1;
     }
 
     return NULL;
