@@ -407,24 +407,41 @@ void *mm_malloc(size_t size)
     return bp;
 }
 
+#define SMALL_FIT_CUTOFF 128
+#define IS_WILDERNESS(bp) (GET_SIZE(HDRP(NEXT_BLKP(bp))) == 0)
+
 static char *find_fit(size_t size)
 {
     int index = SEG_INDEX(size);
+    char *saved_top = NULL;
+    size_t saved_top_size = 0;
 
-    while (index < SEG_LIST_COUNT)
+    for (int i = index; i < SEG_LIST_COUNT; i++)
     {
-        char *bp = GET_SEG_HEAD(index);
+        char *bp = GET_SEG_HEAD(i);
         char *best_bp = NULL;
         size_t best_size = 0;
+
         while (bp != NULL)
         {
             size_t free_size = GET_SIZE(HDRP(bp));
 
-            if (!GET_ALLOC(HDRP(bp)) && free_size >= size)
+            if (free_size >= size)
             {
-                if (free_size == size)
+                if (size <= SMALL_FIT_CUTOFF && IS_WILDERNESS(bp))
                 {
-                    return bp;
+                    if (saved_top == NULL || free_size < saved_top_size)
+                    {
+                        saved_top = bp;
+                        saved_top_size = free_size;
+                    }
+                    bp = GET_SUCC(bp);
+                    continue;
+                }
+
+                if (i == index)
+                {
+                    return bp; // same-bin first-fit
                 }
 
                 if (best_bp == NULL || free_size < best_size)
@@ -440,10 +457,9 @@ static char *find_fit(size_t size)
         {
             return best_bp;
         }
-        index += 1;
     }
 
-    return NULL;
+    return saved_top; // 다른 후보가 없을 때만 wilderness 사용
 }
 
 static void place(char *p, size_t asize)
