@@ -280,27 +280,27 @@ void *mm_realloc(void *ptr, size_t size)
     void *newptr;
     void *bp = ptr;
 
+    size_t all_size = ALIGN(size) + DSIZE;
+    size_t cur_size = GET_SIZE(HDRP(bp));
+    size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
+
     // if (size == 0)
     // {
     //     mm_free(bp);
     //     return NULL;
     // }
 
-    // if (all_size <= cur_size)
-    // {
-    //     PUT(HDRP(bp), PACK(all_size, 0));
-    //     PUT(FTRP(bp), PACK(all_size, 0));
-    //     return bp;
-    // }
+    if (all_size <= cur_size)
+    {
+        // PUT(HDRP(bp), PACK(all_size, 0));
+        // PUT(FTRP(bp), PACK(all_size, 0));
+        return bp;
+    }
 
     if (ptr == NULL)
     {
         return mm_malloc(size);
     }
-
-    size_t all_size = ALIGN(size) + DSIZE;
-    size_t cur_size = GET_SIZE(HDRP(bp));
-    size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
 
     if ((!GET_ALLOC(HDRP(NEXT_BLKP(bp)))) &&
         (all_size <= cur_size + next_size))
@@ -319,7 +319,7 @@ void *mm_realloc(void *ptr, size_t size)
 
         if (newptr == NULL)
         {
-            newptr = extend_heap(MAX(all_size, CHUNKSIZE) / WSIZE);
+            newptr = extend_heap(MAX(all_size - cur_size, CHUNKSIZE) / WSIZE);
 
             next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
 
@@ -335,13 +335,13 @@ void *mm_realloc(void *ptr, size_t size)
 
             // alloc free alloc epilogue 블럭일 경우, free 부분을 확장 후, 뒤로 옮기기 위해서 따로 조건을 추가
             place(newptr, all_size);
-            memcpy(newptr, bp, all_size - DSIZE);
+            memcpy(newptr, bp, cur_size - DSIZE);
             mm_free(bp);
             return newptr;
         }
 
         place(newptr, all_size);
-        memcpy(newptr, bp, all_size - DSIZE);
+        memcpy(newptr, bp, cur_size - DSIZE);
         mm_free(bp);
 
         return newptr;
