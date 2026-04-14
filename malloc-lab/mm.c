@@ -58,6 +58,26 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #define MINBLOCKSIZE (DSIZE + (2 * SIZE_T_SIZE))
+#define SEG_LIST_COUNT 16
+#define SEG_ROOT_BYTES (SEG_LIST_COUNT * SIZE_T_SIZE)
+#define SEG_MAX_INDEX (SEG_LIST_COUNT - 1)
+#define SEG_INDEX(size)          \
+    ((size) <= MINBLOCKSIZE ? 0  \
+     : (size) <= 1 << 5     ? 1  \
+     : (size) <= 1 << 6     ? 2  \
+     : (size) <= 1 << 7     ? 3  \
+     : (size) <= 1 << 8     ? 4  \
+     : (size) <= 1 << 9     ? 5  \
+     : (size) <= 1 << 10    ? 6  \
+     : (size) <= 1 << 11    ? 7  \
+     : (size) <= 1 << 12    ? 8  \
+     : (size) <= 1 << 13    ? 9  \
+     : (size) <= 1 << 14    ? 10 \
+     : (size) <= 1 << 15    ? 11 \
+     : (size) <= 1 << 16    ? 12 \
+     : (size) <= 1 << 17    ? 13 \
+     : (size) <= 1 << 18    ? 14 \
+                            : 15)
 
 /**
  * 사이즈를 지정할 때, 왜 size_t로 8바이트 데이터 타입을 쓰는지 생각해보니
@@ -94,6 +114,58 @@ team_t team = {
 static char *heap_listp;
 // 가용 리스트에 제일 앞에 담기는 것
 static char *heap_free_listp;
+// 정해진 리스트의 개수를 배열로 담는 그릇
+static char *seg_free_listp[SEG_LIST_COUNT];
+
+/*
+ * SEG LIST 전환 힌트
+ * - 지금은 `heap_free_listp` 하나만 쓰는 단일 explicit free list 구조다.
+ * - 다음 단계에서는 `static char *seg_free_listp[SEG_LIST_COUNT];` 같은 head 배열로 바꾸는 쪽이 가장 단순하다.
+ * - `SEG_INDEX(size)`는 "이 크기의 free block이 어느 리스트로 들어가야 하는가"를 빠르게 정하는 용도다.
+ *
+ * 함수 추가/수정 힌트
+ * - `mm_init`
+ *   모든 seglist head를 NULL로 초기화해야 한다.
+ *   만약 head 배열을 힙 앞부분에 둘 생각이면 `SEG_ROOT_BYTES`만큼 prologue 전에 추가 공간을 확보하면 된다.
+ *
+ * - `push_free`
+ *   이제는 단일 head가 아니라 `SEG_INDEX(GET_SIZE(HDRP(bp)))`로 class를 구해서
+ *   해당 class head에만 LIFO 방식으로 insert하면 된다.
+ *
+ * - `rem_free`
+ *   제거할 블록의 현재 크기로 class를 다시 구한 뒤,
+ *   그 class list 안에서만 pred/succ를 끊어주면 된다.
+ *
+ * - `find_fit`
+ *   요청 크기의 class에서 시작해서 더 큰 class로 올라가며 탐색하면 된다.
+ *   처음에는 "각 class 내부 first fit + 상위 class 순차 탐색"만 해도 구현이 단순하고 충분히 빠르다.
+ *
+ * static void *find_fit(size_t asize)
+ * {
+ *    void *bp;
+ *
+ *    // 명시적 가용 리스트에서 asize보다 사이즈가 큰 블록을 탐색 (명시적 가용 리스트의 끝, 즉 프롤로그 블록에 이르기 전까지)
+ *    for (bp = explicit_listp; GET_ALLOC(HDRP(bp)) != 1; bp = GET_SUCC_FREEP(bp))
+ *    {
+ *        if (GET_SIZE(HDRP(bp)) >= asize)
+ *            return bp;
+ *   }
+ *
+ *    return NULL; // 가용한 블록이 없는 경우
+ * }
+ *
+ *
+ * - `coalesce`
+ *   이웃 free block이 있으면 각각 자기 class list에서 먼저 제거한 뒤 합친다.
+ *   그리고 최종 병합 블록 한 개만 새 크기에 맞는 class로 다시 insert해야 한다.
+ *
+ * - `place` / `place_allocated`
+ *   할당 전에 원래 free block은 해당 seglist에서 제거해야 한다.
+ *   split이 생기면 남은 free block은 "남은 크기 기준 class"로 다시 insert해야 한다.
+ *
+ * - 필요하면 나중에 `find_fit` 안에서만 쓸 작은 helper를 하나 더 만들어도 된다.
+ *   예: "특정 class head를 가져오는 함수", "다음 non-empty class를 찾는 함수"
+ */
 
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
@@ -117,15 +189,21 @@ int mm_init(void)
      * (void*) -1 (유효하지 않은 주소)
      * 보통 시스템 콜 실패 시 반환값!
      */
-    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1)
+    if ((heap_listp = mem_sbrk(4 * WSIZE + SEG_ROOT_BYTES)) == (void *)-1)
         return -1;
-    PUT(heap_listp, 0);                            // 4 byte 패딩 설정
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // prologue header
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // prologue footer
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));     // epilogue header
+    PUT(heap_listp, 0); // 4 byte 패딩 설정
+    // 이 공간에 seglist 배열이 들어가 있음
+    PUT(heap_listp + (1 * WSIZE + SEG_ROOT_BYTES), PACK(DSIZE, 1)); // prologue header
+    PUT(heap_listp + (2 * WSIZE + SEG_ROOT_BYTES), PACK(DSIZE, 1)); // prologue footer
+    PUT(heap_listp + (3 * WSIZE + SEG_ROOT_BYTES), PACK(0, 1));     // epilogue header
 
     heap_listp += (2 * WSIZE); // Payload 위치 설정 (prologue payload)
     heap_free_listp = NULL;
+    char i;
+    for (i; i < SEG_LIST_COUNT; i++)
+    {
+        PUT2(seg_free_listp[i], NULL);
+    }
 
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
@@ -156,22 +234,13 @@ static void *extend_heap(size_t words)
 // heap_free_listp에 스택 방식으로 집어넣기
 static void push_free(void *p)
 {
-    /*
-     * HINT (Explicit free list, LIFO/stack insert):
-     * - free list의 "head"를 `heap_free_listp`로 둔다.
-     * - 새로 free된 블록 `p`를 항상 head에 꽂으면 LIFO(스택) 방식이 된다.
-     *
-     * 연결 규칙(개념):
-     * - p->pred = NULL
-     * - p->succ = old_head
-     * - if (old_head != NULL) old_head->pred = p
-     * - heap_free_listp = p
-     *
-     * 구현 시에는 위의 `pred/succ`를 여기서 만든 매크로를 써서 접근:
-     * - `PUT(PRED(p), ...)`, `PUT(SUCC(p), ...)` 또는 `GET_PRED/GET_SUCC` 조합
-     * - 주의: `PRED(bp)`/`SUCC(bp)`는 "저장 위치"이고, `GET_PRED/GET_SUCC`는 "저장된 포인터 값"이다.
-     */
+    // 1. 사이즈를 구한다.
+    size_t size = GET_SIZE(p);
 
+    // 2. 사이즈에 맞는 클래스를 찾는다.
+    char index = SEG_INDEX(size);
+
+    // 3. LIFO 방식으로 집어넣는다.
     char *old_ptr;
 
     if (p == NULL)
@@ -179,7 +248,7 @@ static void push_free(void *p)
         return;
     }
 
-    old_ptr = heap_free_listp;
+    old_ptr = seg_free_listp[index];
 
     /**
      * PUT2(PRED(p), NULL);
@@ -191,28 +260,35 @@ static void push_free(void *p)
     {
         SET_PRED(old_ptr, p);
     }
-    heap_free_listp = p;
+    seg_free_listp[index] = p;
 }
 
 // heap_free_listp에 스택 방식으로 빼기
+// 만약에 rem_free할 공간을 찾질 못한다면?
 static void rem_free(void *p)
 {
-    /*
-     * HINT (remove a free block from explicit list):
-     * - 제거 대상 `p`의 pred/succ를 읽어서 양 옆을 서로 연결해준다.
-     *
-     * 케이스 분기(개념):
-     * - if (pred == NULL)  => p가 head
-     *      heap_free_listp = succ
-     *      if (succ != NULL) succ->pred = NULL
-     * - else               => p가 중간/끝
-     *      pred->succ = succ
-     *      if (succ != NULL) succ->pred = pred
-     *
-     * 선택 힌트:
-     * - 디버깅 쉽게 하려면 제거 후 `p->pred`, `p->succ`를 NULL로 지워도 된다(필수 아님).
-     * - 인자로 void*만 받으면 제거할 블록을 못 고르니, 보통 시그니처는 `rem_free(char *p)`처럼 "대상 포인터"가 필요하다.
-     */
+    // 1. 먼저 사이즈를 구한다.
+    size_t size = GET_SIZE(p);
+    // 2. 사이즈에 맞는 클래스를 찾는다.
+    char index = SEG_INDEX(size);
+    // 3. LIFO 방식으로 클래스에서 찾아서 제거한다.
+    // -> 하지만 그 클래스에 아무것도 존재하지 않는다면
+    // -> 다음 블럭으로 넘어가서 체크를 해봐야 한다.
+    while (index != 16)
+    {
+        char *new_ptr = seg_free_listp[index];
+
+        if (new_ptr == NULL)
+        {
+            index += 1;
+            continue;
+        }
+
+        return;
+    }
+
+    return NULL;
+
     char *pred;
     char *succ;
 
