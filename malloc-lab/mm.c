@@ -280,10 +280,6 @@ void *mm_realloc(void *ptr, size_t size)
     void *newptr;
     void *bp = ptr;
 
-    size_t all_size = ALIGN(size) + DSIZE;
-    size_t cur_size = GET_SIZE(HDRP(bp));
-    size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
-
     // if (size == 0)
     // {
     //     mm_free(bp);
@@ -302,6 +298,10 @@ void *mm_realloc(void *ptr, size_t size)
         return mm_malloc(size);
     }
 
+    size_t all_size = ALIGN(size) + DSIZE;
+    size_t cur_size = GET_SIZE(HDRP(bp));
+    size_t next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
+
     if ((!GET_ALLOC(HDRP(NEXT_BLKP(bp)))) &&
         (all_size <= cur_size + next_size))
     {
@@ -315,16 +315,16 @@ void *mm_realloc(void *ptr, size_t size)
     }
     else
     {
-        newptr = mm_malloc(size);
+        newptr = find_fit(all_size);
 
         if (newptr == NULL)
         {
-            newptr = extend_heap(MAX(all_size - cur_size, CHUNKSIZE));
+            newptr = extend_heap(MAX(all_size, CHUNKSIZE) / WSIZE);
+
+            next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
 
             if (!GET_ALLOC(HDRP(NEXT_BLKP(bp))) && all_size <= cur_size + next_size)
             {
-                next_size = GET_SIZE(HDRP(NEXT_BLKP(bp)));
-
                 PUT(HDRP(bp), PACK((cur_size + next_size), 0));
                 PUT(FTRP(bp), PACK((cur_size + next_size), 0));
 
@@ -337,9 +337,10 @@ void *mm_realloc(void *ptr, size_t size)
             place(newptr, all_size);
             memcpy(newptr, bp, all_size - DSIZE);
             mm_free(bp);
-            return bp;
+            return newptr;
         }
 
+        place(newptr, all_size);
         memcpy(newptr, bp, all_size - DSIZE);
         mm_free(bp);
 
